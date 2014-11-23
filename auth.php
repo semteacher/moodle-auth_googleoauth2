@@ -57,7 +57,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
         //username must exist and have the right authentication method
         if (!empty($user) && ($user->auth == 'googleoauth2')) {
             $code = optional_param('code', false, PARAM_TEXT);
-            if($code === false){
+            if(empty($code)){
                 return false;
             }
             return true;
@@ -186,10 +186,16 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                         $params = array();
                         $params['access_token'] = $accesstoken;
                         $params['alt'] = 'json';
-                        $postreturnvalues = $curl->get('https://www.googleapis.com/oauth2/v3/userinfo', $params);
+                        $postreturnvalues = $curl->get('https://www.googleapis.com/plus/v1/people/me', $params);
                         $postreturnvalues = json_decode($postreturnvalues);
-                        $useremail = $postreturnvalues->email;
-                        $verified = $postreturnvalues->email_verified;
+                        foreach($postreturnvalues->emails as $googleemail) {
+                            if($googleemail->type == "account") {
+                                $useremail = $googleemail->value;
+                            }
+                        }
+                        $useremail = $postreturnvalues->emails[0]->value;
+                        // All emails are verified: https://developers.google.com/+/api/latest/people.
+                        $verified = 1;
                         break;
 
                     case 'facebook':
@@ -216,12 +222,16 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                         $params['access_token'] = $accesstoken;
                         $postreturnvalues = $curl->get('https://api.github.com/user', $params);
                         $githubuser = json_decode($postreturnvalues);
+                        // Use the final version of the API v3.
+                        // Recommendation on https://developer.github.com/v3/media/
+                        // See https://developer.github.com/v3/versions/#v3
+                        $curl->setHeader('Accept: application/vnd.github.v3+json');
                         $useremails = json_decode($curl->get('https://api.github.com/user/emails', $params));
                         $useremail = '';
                         $verified = 0;
                         // get first valid email
                         foreach ($useremails as $email) {
-                            if ($email->verified) {
+                            if ($email->verified && $email->email == clean_param($email->email, PARAM_EMAIL)) {
                                 $useremail = $email->email;
                                 $verified = (int) $email->verified;
                                 break;
@@ -270,18 +280,17 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
 
                     //get following incremented username
+                    $googleuserprefix = core_text::strtolower(get_config('auth/googleoauth2', 'googleuserprefix'));
                     $lastusernumber = get_config('auth/googleoauth2', 'lastusernumber');
-                    $lastusernumber = empty($lastusernumber)?1:$lastusernumber++;
+                    $lastusernumber = empty($lastusernumber)? 1 : $lastusernumber++;
                     //check the user doesn't exist
-                    $nextuser = $DB->get_record('user',
-                            array('username' => get_config('auth/googleoauth2', 'googleuserprefix').$lastusernumber));
-                    while (!empty($nextuser)) {
-                        $lastusernumber = $lastusernumber +1;
-                        $nextuser = $DB->get_record('user',
-                            array('username' => get_config('auth/googleoauth2', 'googleuserprefix').$lastusernumber));
+                    $nextuser = $DB->record_exists('user', array('username' => $googleuserprefix.$lastusernumber));
+                    while ($nextuser) {
+                        $lastusernumber++;
+                        $nextuser = $DB->record_exists('user', array('username' => $googleuserprefix.$lastusernumber));
                     }
                     set_config('lastusernumber', $lastusernumber, 'auth/googleoauth2');
-                    $username = get_config('auth/googleoauth2', 'googleuserprefix') . $lastusernumber;
+                    $username = $googleuserprefix . $lastusernumber;
 
                     //retrieve more information from the provider
                     $newuser = new stdClass();
@@ -291,15 +300,14 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                             $params = array();
                             $params['access_token'] = $accesstoken;
                             $params['alt'] = 'json';
-                            $userinfo = $curl->get('https://www.googleapis.com/oauth2/v1/userinfo', $params);
-                            $userinfo = json_decode($userinfo); //email, id, name, verified_email, given_name, family_name, link, gender, locale
-
+                            $userinfo = $curl->get('https://www.googleapis.com/plus/v1/people/me', $params);
+                            $userinfo = json_decode($userinfo);
                             $newuser->auth = 'googleoauth2';
-                            if (!empty($userinfo->given_name)) {
-                                $newuser->firstname = $userinfo->given_name;
+                            if (!empty($userinfo->name->givenName)) {
+                                $newuser->firstname = $userinfo->name->givenName;
                             }
-                            if (!empty($userinfo->family_name)) {
-                                $newuser->lastname = $userinfo->family_name;
+                            if (!empty($userinfo->name->familyName)) {
+                                $newuser->lastname = $userinfo->name->familyName;
                             }
                             if (!empty($userinfo->locale)) {
                                 //$newuser->lang = $userinfo->locale;
@@ -339,6 +347,14 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                             break;
                     }
 
+                    // Some providers allow empty firstname and lastname.
+                    if (empty($newuser->firstname)) {
+                        $newuser->firstname = get_string('unknownfirstname', 'auth_googleoauth2');
+                    }
+                    if (empty($newuser->lastname)) {
+                        $newuser->lastname = get_string('unknownlastname', 'auth_googleoauth2');
+                    }
+
                     //retrieve country and city if the provider failed to give it
                     if (!isset($newuser->country) or !isset($newuser->city)) {
                         $googleipinfodbkey = get_config('auth/googleoauth2', 'googleipinfodbkey');
@@ -362,8 +378,9 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
                 //authenticate the user
                 //TODO: delete this log later
+                require_once($CFG->dirroot . '/auth/googleoauth2/lib.php');
                 $userid = empty($user)?'new user':$user->id;
-                add_to_log(SITEID, 'auth_googleoauth2', '', '', $username . '/' . $useremail . '/' . $userid);
+                oauth_add_to_log(SITEID, 'auth_googleoauth2', '', '', $username . '/' . $useremail . '/' . $userid);
                 $user = authenticate_user_login($username, null);
                 if ($user) {
 
@@ -402,9 +419,22 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                         unset($SESSION->wantsurl);
                     }
                     redirect($urltogo);
+                } else {
+                    // authenticate_user_login() failure, probably email registered by another auth plugin
+                    // Do a check to confirm this hypothesis.
+                    $userexist = $DB->get_record('user', array('email' => $useremail));
+                    if (!empty($userexist) and $userexist->auth != 'googleoauth2') {
+                        $a = new stdClass();
+                        $a->loginpage = (string) new moodle_url(empty($CFG->alternateloginurl) ? '/login/index.php' : $CFG->alternateloginurl);
+                        $a->forgotpass = (string) new moodle_url('/login/forgot_password.php');
+                        throw new moodle_exception('couldnotauthenticateuserlogin', 'auth_googleoauth2', '', $a);
+                    } else {
+                        throw new moodle_exception('couldnotauthenticate', 'auth_googleoauth2');
+                    }
                 }
             } else {
-                throw new moodle_exception('couldnotgetgoogleaccesstoken', 'auth_googleoauth2');
+                throw new moodle_exception('couldnotgetgoogleaccesstoken', 'auth_googleoauth2',
+                    '', null, print_r($postreturnvalues, true));
             }
         } else {
             // If you are having issue with the display buttons option, add the button code directly in the theme login page.
@@ -478,10 +508,18 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
             $config->oauth2displaybuttons = 1;
         }
 
+        if (file_exists($CFG->dirroot . '/auth/googleoauth2/COMMUNITYEDITION.md')) {
+            print_string('communityeditionmsg', 'auth_googleoauth2');
+        } else {
+            print_string('businesseditionmsg', 'auth_googleoauth2');
+        }
+
         echo '<table cellspacing="0" cellpadding="5" border="0">
             <tr>
                <td colspan="3">
                     <h2 class="main">';
+
+
 
         print_string('auth_googlesettings', 'auth_googleoauth2');
 
@@ -559,7 +597,8 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
         echo '</td><td>';
 
         print_string('auth_facebookclientid', 'auth_googleoauth2',
-            (object) array('siteurl' => $CFG->wwwroot . '/auth/googleoauth2/facebook_redirect.php',
+            (object) array('siteurl' => $CFG->httpswwwroot,
+                'callbackurl' => $CFG->httpswwwroot . '/auth/googleoauth2/facebook_redirect.php',
                 'sitedomain' => $parse['host'])) ;
 
         echo '</td></tr>';
@@ -886,7 +925,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
         set_config('linkedinclientid', $config->linkedinclientid, 'auth/googleoauth2');
         set_config('linkedinclientsecret', $config->linkedinclientsecret, 'auth/googleoauth2');
         set_config('googleipinfodbkey', $config->googleipinfodbkey, 'auth/googleoauth2');
-        set_config('googleuserprefix', $config->googleuserprefix, 'auth/googleoauth2');
+		set_config('googleuserprefix', core_text::strtolower($config->googleuserprefix), 'auth/googleoauth2');
         set_config('oauth2displaybuttons', $config->oauth2displaybuttons, 'auth/googleoauth2');
 
         return true;
@@ -909,5 +948,4 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
             return true;
         }
     }
-
 }
