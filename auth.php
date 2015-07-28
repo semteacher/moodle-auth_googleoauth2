@@ -185,6 +185,15 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                     throw new moodle_exception($err, 'auth_googleoauth2');
                 }
 
+                if ('google' == $authprovider) {
+                    if (!auth_googleoauth2_google_domain_is_allowed($useremail)) {
+                        $domain = substr($useremail, strpos($useremail, '@') + 1);
+                        throw new moodle_exception(
+                            'google_nonalloweddomain', 'auth_googleoauth2', '',
+                            (object) array('domain' => $domain));
+                    }
+                }
+
                 // If email not existing in user database then create a new username (userX).
                 if (empty($useremail) or $useremail != clean_param($useremail, PARAM_EMAIL)) {
                     throw new moodle_exception('couldnotgetuseremail', 'auth_googleoauth2');

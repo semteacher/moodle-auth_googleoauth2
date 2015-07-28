@@ -174,3 +174,35 @@ function auth_googleoauth2_render_buttons() {
 
     return $html;
 }
+
+/**
+ * Determine if given email is on an allowed domain.
+ *
+ * @param string $email
+ * @return bool
+ */
+function auth_googleoauth2_google_domain_is_allowed($email) {
+    global $CFG;
+
+    if (!empty($CFG->auth_googleoauth2_google_allowed_domains)) {
+        $allowed = explode(' ', $CFG->auth_googleoauth2_google_allowed_domains);
+        foreach ($allowed as $pattern) {
+            $pattern = trim($pattern);
+            if (!$pattern) {
+                continue;
+            } elseif ('.' == $pattern[0]) {
+                // Adapted from lib/moodlelib.php, email_is_not_allowed()
+                // Except we let .example.com match xxx@example.com in addition
+                // to xxx@anything.example.com
+                if (strpos(strrev($email), strrev(substr($pattern, 1))) === 0) {
+                    return true;
+                }
+            } elseif (strpos(strrev($email), strrev('@' . $pattern)) === 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    return true;
+}
