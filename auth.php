@@ -129,9 +129,12 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
             // With access token request by curl the email address.
             if (!empty($accesstoken)) {
 
+                $useremail = '';
+
                 try {
                     // We got an access token, let's now get the user's details.
                     $userdetails = $provider->getUserDetails($token);
+
                     // Use these details to create a new profile.
                     switch ($authprovider) {
                         case 'battlenet':
@@ -195,7 +198,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                 }
 
                 // If email not existing in user database then create a new username (userX).
-                if (empty($useremail) or $useremail != clean_param($useremail, PARAM_EMAIL)) {
+                if (empty($useremail) || $useremail != clean_param($useremail, PARAM_EMAIL)) {
                     throw new moodle_exception('couldnotgetuseremail', 'auth_googleoauth2');
                     // TODO: display a link for people to retry.
                 }
@@ -256,7 +259,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                     }
 
                     // Retrieve country and city if the provider failed to give it.
-                    if (!isset($newuser->country) or !isset($newuser->city)) {
+                    if (!isset($newuser->country) || !isset($newuser->city)) {
                         $googleipinfodbkey = get_config('auth/googleoauth2', 'googleipinfodbkey');
                         if (!empty($googleipinfodbkey)) {
                             require_once($CFG->libdir . '/filelib.php');
@@ -332,22 +335,22 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
                     // Check if the user picture is the default and retrieve the provider picture.
                     if (empty($user->picture)) {
+                        $profilepicurl = '';
                         switch ($authprovider) {
                             case 'battlenet':
-                                require_once($CFG->libdir . '/filelib.php');
-                                require_once($CFG->libdir . '/gdlib.php');
-                                $imagefilename = $CFG->tempdir . '/googleoauth2-portrait-' . $user->id;
-                                $imagecontents = download_file_content($userdetails->portrait_url);
-                                file_put_contents($imagefilename, $imagecontents);
-                                if ($newrev = process_new_icon(context_user::instance($user->id),
-                                    'user', 'icon', 0, $imagefilename)) {
-                                    $DB->set_field('user', 'picture', $newrev, array('id' => $user->id));
-                                }
-                                unlink($imagefilename);
+                                $profilepicurl = $userdetails->portrait_url;
+                                break;
+                            case 'google':
+                                $profilepicurl = str_replace('?sz=50', '?sz=300', $userdetails->imageUrl);
                                 break;
                             default:
-                                // TODO retrieve other provider profile pictures.
+                                if (!empty($userdetails->imageUrl)) {
+                                    $profilepicurl = $userdetails->imageUrl;
+                                }
                                 break;
+                        }
+                        if (!empty($profilepicurl)) {
+                            $this->set_profile_picture($user, $profilepicurl);
                         }
                     }
 
@@ -362,7 +365,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                     if (user_not_fully_set_up($USER)) {
                         $urltogo = $CFG->wwwroot.'/user/edit.php';
                         // We don't delete $SESSION->wantsurl yet, so we get there later.
-                    } else if (isset($SESSION->wantsurl) and (strpos($SESSION->wantsurl, $CFG->wwwroot) === 0)) {
+                    } else if (isset($SESSION->wantsurl) && (strpos($SESSION->wantsurl, $CFG->wwwroot) === 0)) {
                         $urltogo = $SESSION->wantsurl;    // Because it's an address in this site.
                         unset($SESSION->wantsurl);
                     } else {
@@ -370,12 +373,17 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                         $urltogo = $CFG->wwwroot.'/';
                         unset($SESSION->wantsurl);
                     }
+
+                    $loginrecord = array('userid' => $USER->id, 'time' => time(),
+                        'auth' => 'googleoauth2', 'subtype' => $authprovider);
+                    $DB->insert_record('auth_googleoauth2_logins', $loginrecord);
+
                     redirect($urltogo);
                 } else {
                     // Authenticate_user_login() failure, probably email registered by another auth plugin.
                     // Do a check to confirm this hypothesis.
                     $userexist = $DB->get_record('user', array('email' => $useremail));
-                    if (!empty($userexist) and $userexist->auth != 'googleoauth2') {
+                    if (!empty($userexist) && $userexist->auth != 'googleoauth2') {
                         $a = new stdClass();
                         $a->loginpage = (string) new moodle_url(empty($CFG->alternateloginurl) ?
                             '/login/index.php' : $CFG->alternateloginurl);
@@ -395,8 +403,8 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                 // We can add more param check for others provider but at the end,
                 // the best way may be to not use the oauth2displaybuttons option and
                 // add the button code directly in the theme login page.
-                and empty($_POST['username'])
-                and empty($_POST['password'])) {
+                && empty($_POST['username'])
+                && empty($_POST['password'])) {
                 // Display the button on the login page.
                 require_once($CFG->dirroot . '/auth/googleoauth2/lib.php');
 
@@ -405,14 +413,29 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
                 global $PAGE, $CFG;
                 $PAGE->requires->jquery();
                 $content = str_replace(array("\n", "\r"), array("\\\n", "\\\r"), auth_googleoauth2_display_buttons(false));
-                $PAGE->requires->js_init_code('oauth2cssurl = "' . $CFG->httpswwwroot .
-                    '/auth/googleoauth2/socialsharekit/dist/css/social-share-kit.css"');
-                $PAGE->requires->js_init_code('oauth2cssurl2 = "' . $CFG->httpswwwroot .
-                    '/auth/googleoauth2/style.css"');
+                $PAGE->requires->css('/auth/googleoauth2/style.css');
                 $PAGE->requires->js_init_code("buttonsCodeOauth2 = '$content';");
                 $PAGE->requires->js(new moodle_url($CFG->wwwroot . "/auth/googleoauth2/script.js"));
             }
         }
+    }
+
+    /**
+     * Retrieve the profile picture and save it in moodle.
+     */
+    private function set_profile_picture($user, $profilepicurl) {
+        global $CFG, $DB;
+
+        require_once($CFG->libdir . '/filelib.php');
+        require_once($CFG->libdir . '/gdlib.php');
+        $imagefilename = $CFG->tempdir . '/googleoauth2-portrait-' . $user->id;
+        $imagecontents = download_file_content($profilepicurl);
+        file_put_contents($imagefilename, $imagecontents);
+        if ($newrev = process_new_icon(context_user::instance($user->id),
+            'user', 'icon', 0, $imagefilename)) {
+            $DB->set_field('user', 'picture', $newrev, array('id' => $user->id));
+        }
+        unlink($imagefilename);
     }
 
 
@@ -424,12 +447,14 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
      *
      * TODO: as print_auth_lock_options() core function displays an old-fashion HTML table, I didn't bother writing
      * some proper Moodle code. This code is similar to other auth plugins (04/09/11)
-     *
-     * @param array $page An object containing all the data for this page.
      */
     public function config_form($config, $err, $userfields) {
         global $OUTPUT, $CFG;
 
+        echo '<div class="alert alert-success"  role="alert">' . get_string('supportmaintenance', 'auth_googleoauth2') . '</div>';
+
+
+        // TODO: replace this table html ugliness by some nice bootstrap html code.
         echo '<table cellspacing="0" cellpadding="5" border="0">
             <tr>
                <td colspan="3">
@@ -457,7 +482,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
             echo '</h2>
                </td>
             </tr>
-            <tr>
+            <tr  style="vertical-align: top;">
                 <td align="right"><label for="'.$clientidname.'">';
 
             print_string('auth_'.$clientidname.'_key', 'auth_googleoauth2');
@@ -485,7 +510,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
             // Client secret.
 
-            echo '<tr>
+            echo '<tr  style="vertical-align: top;">
                 <td align="right"><label for="'.$clientsecretname.'">';
 
             print_string('auth_'.$clientsecretname.'_key', 'auth_googleoauth2');
@@ -504,7 +529,8 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
             print_string('auth_'.$clientsecretname, 'auth_googleoauth2');
 
-            echo '</td></tr>';
+            echo '</td></tr>
+            <tr style="min-height: 20px"><td>&nbsp;</td></tr>';
         }
 
         if (!isset($config->googleipinfodbkey)) {
@@ -590,6 +616,7 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
 
         echo '</td></tr>';
 
+
         // Block field options.
         // Hidden email options - email must be set to: locked.
         echo html_writer::empty_tag('input', array('type' => 'hidden', 'value' => 'locked',
@@ -604,7 +631,95 @@ class auth_plugin_googleoauth2 extends auth_plugin_base {
         print_auth_lock_options('googleoauth2', $userfields, get_string('auth_fieldlocks_help', 'auth'), false, false);
 
         echo '</table>';
+
+        // Calculate how many login per providers.
+        $providerstats = (object) $this->get_stats();
+        $strothermoodle = get_string('othermoodle', 'auth_googleoauth2');
+        $strstattitle = get_string('stattitle', 'auth_googleoauth2', $providerstats);
+        echo '
+            <center>
+            <script type="text/javascript" src="https://www.google.com/jsapi"></script>
+                <script type="text/javascript">
+                  google.load("visualization", "1", {packages:["corechart"]});
+                  google.setOnLoadCallback(drawChart);
+                  function drawChart() {
+
+                    var data = google.visualization.arrayToDataTable([
+                      [\'Provider\', \'Login total\'],
+                      [\'Google\', ' . $providerstats->google . '],
+                      [\'Facebook\', ' . $providerstats->facebook . ' ],
+                      [\'Github\',  ' . $providerstats->github . ' ],
+                      [\'Linkedin\', ' . $providerstats->linkedin . ' ],
+                      [\'Microsoft\', ' . $providerstats->microsoft . ' ],
+                      [\'Dropbox\', ' . $providerstats->dropbox . ' ],
+                      [\'VK\', ' . $providerstats->vk . ' ],
+                      [\'Battle.net\', ' . $providerstats->battlenet . ' ],
+                      [\''.$strothermoodle.'\',    ' . $providerstats->moodle . ' ]
+                    ]);
+
+                    var options = {
+                      title: \''.$strstattitle.'\',
+                      is3D: true,
+                      slices: {
+                        0: { color: \'#D50F25\' },
+                        1: { color: \'#3b5998\' },
+                        2: { color: \'#eee\', fontcolor: \'black\'},
+                        3: { color: \'#007bb6\'},
+                        4: { color: \'#7cbb00\'},
+                        5: { color: \'#007ee5\'},
+                        6: { color: \'#45668e\'},
+                        7: { color: \'#00B4FF\'},
+                        8: { color: \'#ee7600\'}
+                      }
+                    };
+
+                    var chart = new google.visualization.PieChart(document.getElementById(\'piechart\'));
+
+                    chart.draw(data, options);
+                  }
+                </script>
+             <div id="piechart" style="width: 900px; height: 500px;"></div>
+            </center>
+        ';
     }
+
+    /**
+     * Retrieve the login provider stats.
+     */
+    public function get_stats($periodindays = 60) {
+        global $DB;
+
+        // Retrieve the logins.
+        $sql = 'time > :time';
+        $logins = $DB->get_records_select('auth_googleoauth2_logins', $sql,
+            array('time' => strtotime('-' . $periodindays . ' days', time())));
+
+        // Retrieve the moodle auth stats.
+        $loginstats = array( 'google' => 0,
+                             'facebook' => 0,
+                             'github' => 0,
+                             'linkedin' => 0,
+                             'microsoft' => 0,
+                             'dropbox' => 0,
+                             'vk' => 0,
+                             'battlenet' => 0,
+                             'moodle' => 0,
+                             'periodindays' => $periodindays);
+
+        // Retrieve the provider stats.
+        foreach ($logins as $login) {
+            if ($login->auth !== 'googleoauth2') {
+                $loginstats['moodle'] += 1;
+            } else {
+                $loginstats[$login->subtype] += 1;
+            }
+        }
+
+
+
+        return $loginstats;
+    }
+
 
     /**
      * Processes and stores configuration data for this authentication plugin.
